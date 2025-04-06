@@ -28,14 +28,20 @@ try:
     yolo_model = YOLO(YOLO_MODEL_PATH)  # Load the YOLO model
 except Exception as e:
     raise RuntimeError(f"Error loading models: {str(e)}")
-
 @app.route('/predictedImage', methods=['GET'])
 def predicted_image():
     try:
         # Locate the latest YOLO prediction folder
         yolo_output_dir = "runs/detect/"
         latest_dir = sorted([os.path.join(yolo_output_dir, d) for d in os.listdir(yolo_output_dir)], key=os.path.getmtime, reverse=True)[0]
-        predicted_image_path = os.path.join(latest_dir, "image0.jpg")  # Replace 'image.jpg' with the actual file name if needed
+        
+        # Get the list of files in the latest directory and find the image file
+        files = os.listdir(latest_dir)
+        image_files = [f for f in files if f.endswith(('.jpg', '.jpeg', '.png'))]  # Consider image extensions
+        if not image_files:
+            return jsonify({"error": "No image file found in the prediction folder"}), 404
+
+        predicted_image_path = os.path.join(latest_dir, image_files[0])  # Get the first image file
 
         if not os.path.exists(predicted_image_path):
             return jsonify({"error": "Predicted image not found"}), 404
@@ -44,8 +50,9 @@ def predicted_image():
         return send_file(predicted_image_path, mimetype='image/jpeg')
     except Exception as e:
         return jsonify({"error": f"An error occurred: {str(e)}"}), 500
+    
 
-        
+    
 @app.route('/predict', methods=['POST'])
 def predict():
     # Ensure file is present in the request
@@ -61,11 +68,13 @@ def predict():
     try:
         # Convert the file to a BytesIO object and open it as an image
         img = Image.open(BytesIO(file.read()))
+        print(f"Received image with mode: {img.mode}")
         img2 = img
 
         # Convert RGBA to RGB if needed
         if img.mode != "RGB":
             img = img.convert("RGB")
+        print(f"Image converted to mode: {img.mode}")
 
         # -----------------------------------
         # ANN Model Feature Extraction
@@ -73,6 +82,7 @@ def predict():
         # Resize and preprocess the image for ANN model
         ann_img = img.resize(IMG_SIZE)
         img_array = img_to_array(ann_img)
+        print(f"ANN image size: {ann_img.size}")
         img_array = preprocess_input(img_array)  # Normalize pixel values
         img_array = img_array.flatten()  # Flatten to 1D array
         img_array = np.expand_dims(img_array, axis=0)  # Add batch dimension
@@ -80,6 +90,7 @@ def predict():
         # ANN prediction
         ann_prediction = ann_model.predict(img_array)
         ann_predicted_label = CLASSES[int(ann_prediction[0] > 0.5)]  # Threshold at 0.5
+        print(f"ANN predicted label: {ann_predicted_label}")
 
         # -----------------------------------
         # Random Forest Model Feature Extraction
@@ -117,17 +128,21 @@ def predict():
 
         # Resize and normalize the image
         img_resized = np.resize(np.array(img), IMG_SIZE + (3,)) / 255.0
+        print(f"Resized image shape for RF: {img_resized.shape}")
         rf_features = extract_features(img_resized).reshape(1, -1)  # Reshape for model
+        print(f"RF features shape: {rf_features.shape}")
 
         # Random Forest prediction
         rf_prediction = rf_model.predict(rf_features)
         rf_predicted_label = CLASSES[int(rf_prediction[0])]
+        print(f"Random Forest predicted label: {rf_predicted_label}")
 
         # -----------------------------------
         # YOLO Model Prediction
         # -----------------------------------
         # Perform YOLO prediction using the original image
-        yolo_predictions = yolo_model.predict(source=img2, save=True)
+        yolo_predictions = yolo_model.predict(source=img2, save=True, save_txt=True, project='runs/detect', name='predictions')
+        print(f"YOLO predictions: {yolo_predictions}")
 
         # Analyze YOLO predictions
         class_counts = Counter()
@@ -137,12 +152,12 @@ def predict():
                 class_name = yolo_model.names[int(class_id)]  # Map class index to name
                 class_counts[class_name] += 1
 
-                # Return predictions as JSON response
+        # Return predictions as JSON response
         response = {
             "random_forest_label": rf_predicted_label,
-            
         }
-
+        
+        print(yolo_predictions[0].save_dir)
         # Include YOLO class counts only if the car is labeled as "Damaged" by Random Forest
         if rf_predicted_label == "Damaged":
             response["yolo_class_counts"] = dict(class_counts)
@@ -153,6 +168,7 @@ def predict():
     except ValueError as ve:
         return jsonify({"error": f"Value error: {str(ve)}"}), 500
     except Exception as e:
+        print(f"Error during prediction: {str(e)}")
         return jsonify({"error": f"An unexpected error occurred: {str(e)}"}), 500
 
 
